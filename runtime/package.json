@@ -1,0 +1,17 @@
+{
+  "name": "agentic-lab-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs"
+  },
+  "dependencies": {
+    "@ag-ui/a2a-middleware": "^0.0.2",
+    "@ag-ui/client": "^0.0.59",
+    "@copilotkit/runtime": "^1.61.2",
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}

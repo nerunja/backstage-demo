@@ -1,0 +1,18 @@
+[project]
+name = "agentic-lab-agents"
+version = "0.1.0"
+description = "Agentic Lab agents: ADK orchestrator + A2A research/analysis agents"
+requires-python = ">=3.11"
+dependencies = [
+    "google-adk>=1.0.0",
+    "ag-ui-adk>=0.7.0",
+    # Pin to the 0.3.x line: this code uses the pydantic-based API
+    # (A2AStarletteApplication, camelCase AgentCard fields). a2a-sdk 1.x is a
+    # protobuf-based rewrite with an incompatible API (no `server.apps`,
+    # snake_case fields) that this code has not been ported to.
+    "a2a-sdk>=0.3.0,<0.4.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "python-dotenv>=1.0.0",
+    "litellm>=1.40.0",
+]

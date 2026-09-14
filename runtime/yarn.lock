@@ -1,0 +1,2 @@
+# This file marks runtime/ as a standalone npm project, separate from the
+# yarn workspace at the repo root. Yarn 4 respects it as a project boundary.
