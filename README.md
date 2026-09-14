@@ -409,10 +409,11 @@ A2A is a protocol for **agent-to-agent** delegation — one agent (an
 server doesn't need to be built with the same framework, language, or
 even vendor as the client — it just needs to expose:
 
-1. An **Agent Card** at `/.well-known/agent.json` — a JSON document
-   describing what the agent does, its skills, and its endpoint URL.
-2. A JSON-RPC (or REST) endpoint implementing `message/send`,
-   `tasks/get`, etc., per the A2A spec.
+1. An **Agent Card** at `/.well-known/agent-card.json` — a JSON document
+   describing what the agent does, its skills, and its endpoint URL. (The
+   spec renamed this from `/.well-known/agent.json` — see §5.2.)
+2. A JSON-RPC (or REST) endpoint implementing `SendMessage`, `GetTask`,
+   etc., per the A2A spec.
 
 This is the same shape as OpenAPI/gRPC service discovery, but tailored to
 agentic work: an "Agent Card" is like an OpenAPI spec, but describes
@@ -428,21 +429,40 @@ There are **two independent A2A SDKs** here, one per language:
 | Python (server) | `a2a-sdk` | `research_agent.py`, `analysis_agent.py` |
 | JS (client) | `@a2a-js/sdk` | `runtime/server.mjs` (via `@ag-ui/a2a-middleware`) |
 
-This repo's Python agents target the pre-1.0, pydantic-based `a2a-sdk`
-API (`A2AStarletteApplication`, a pydantic `AgentCard`), pinned via
-`pyproject.toml` as `a2a-sdk>=0.3.0,<0.4.0`. `a2a-sdk`'s `1.x` line is an
-unrelated, incompatible protobuf-based rewrite (different module layout,
-`snake_case` fields) — worth knowing since both live on PyPI under the
-same package name.
+This repo's Python agents target the current `a2a-sdk` `1.x` API, pinned
+via `pyproject.toml` as `a2a-sdk[fastapi]>=1.1.2,<2.0.0`. `1.x` is a
+rewrite of the wire protocol itself — `AgentCard`/`AgentSkill`/etc. are now
+**protobuf messages** with `snake_case` fields (imported from the same
+`a2a.types` path, so the import doesn't change, only the field names and
+their shape do), and JSON-RPC method names moved from slash-style
+(`"message/send"`) to protobuf-service-style PascalCase (`"SendMessage"`).
+An older `0.3.x` line exists too (pydantic models, the old method names,
+`A2AStarletteApplication` as the one-call server wrapper) — both live on
+PyPI under the same package name, so double-check which one a given
+example targets.
+
+Because the wire protocol changed, a `1.x` server needs to opt in to
+understanding the *old* wire format if any of its clients (like the JS
+`@a2a-js/sdk` used here) still speak it — `create_jsonrpc_routes(...,
+enable_v0_3_compat=True)` does this, accepting both the old and new
+request shapes on the same endpoint. The well-known agent-card path also
+changed (`/.well-known/agent.json` → `/.well-known/agent-card.json`), and
+unlike `0.3.x`'s all-in-one `A2AStarletteApplication` (which auto-served
+both paths), `1.x`'s route builders serve only whichever path you ask for
+— so a server that needs to support older clients registers the card
+route twice, once per path (§6.2 of `research_agent.py`).
 
 ### 5.3 The A2A servers — `research_agent.py` / `analysis_agent.py`
 
 ```python
 skill = AgentSkill(id="research_agent", name="Research Agent", ...)
 public_agent_card = AgentCard(
-    name="Research Agent", url=f"http://localhost:{port}/",
+    name="Research Agent",
     capabilities=AgentCapabilities(streaming=True),
-    skills=[skill], ...
+    skills=[skill],
+    supported_interfaces=[
+        AgentInterface(url=f"http://localhost:{port}/", protocol_binding="JSONRPC"),
+    ],
 )
 
 class ResearchAgentExecutor(AgentExecutor):
@@ -452,15 +472,31 @@ class ResearchAgentExecutor(AgentExecutor):
         result = await self.agent.invoke(query, session_id)
         await event_queue.enqueue_event(new_agent_text_message(result))
 
-server = A2AStarletteApplication(agent_card=public_agent_card, http_handler=request_handler)
-uvicorn.run(server.build(), ...)
+request_handler = DefaultRequestHandler(
+    agent_executor=ResearchAgentExecutor(),
+    task_store=InMemoryTaskStore(),
+    agent_card=public_agent_card,
+)
+
+app = FastAPI()
+add_a2a_routes_to_fastapi(
+    app,
+    agent_card_routes=[
+        *create_agent_card_routes(public_agent_card),
+        *create_agent_card_routes(public_agent_card, card_url="/.well-known/agent.json"),
+    ],
+    jsonrpc_routes=create_jsonrpc_routes(request_handler, rpc_url="/", enable_v0_3_compat=True),
+    rest_routes=create_rest_routes(request_handler, enable_v0_3_compat=True),
+)
+uvicorn.run(app, ...)
 ```
 Each of these is a **complete, independent web server** — you could `curl`
 it directly, or drive it from a totally different orchestrator, with zero
-code changes. `AgentExecutor.execute()` is the one method you implement:
-receive a `RequestContext` (the incoming task), do whatever work (here:
-run an ADK `LlmAgent` internally — A2A doesn't care what's inside), and
-push the result onto an `EventQueue`.
+code changes. `AgentExecutor.execute()` is the one method you implement
+(and, notably, the one part of this API that's identical across `0.3.x`
+and `1.x`): receive a `RequestContext` (the incoming task), do whatever
+work (here: run an ADK `LlmAgent` internally — A2A doesn't care what's
+inside), and push the result onto an `EventQueue`.
 
 ### 5.4 The A2A client — `@ag-ui/a2a-middleware`
 
@@ -497,6 +533,20 @@ This works because `send_message_to_a2a_agent` is declared exactly *once*
 to that same name (§2.2), never a second declaration, which is what lets
 the middleware reliably correlate every tool-call event back to the right
 arguments as it streams past.
+
+Step 2's correlation happens by scanning `this.messages` — the
+middleware's own running snapshot of the conversation, kept up to date by
+applying each AG-UI event through `this.apply(...)`. That update runs as a
+**fire-and-forget subscription** (`processApplyEvents(...).subscribe()`,
+not awaited), so there's an inherent race: if the model streams a tool
+call's entire JSON as one `TOOL_CALL_ARGS` delta with no gap before
+`TOOL_CALL_END` and `RUN_FINISHED`, the async update can still be pending
+when `RUN_FINISHED` synchronously checks `this.messages` for that tool
+call's arguments — and throws if it isn't there yet, silently stalling the
+run. `runtime/server.mjs` works around this by delaying only the
+`RUN_FINISHED` event by a fixed 50ms (patched onto `HttpAgent.prototype.run`,
+so it applies to every clone), giving the async update time to land
+without slowing down normal token-by-token streaming.
 
 ---
 

@@ -11,6 +11,7 @@
  * orchestrator and streams agent-to-agent traffic back to the frontend.
  */
 import express from 'express';
+import { concatMap, of, tap, timer, map as rxMap } from 'rxjs';
 import { HttpAgent } from '@ag-ui/client';
 import { A2AMiddlewareAgent } from '@ag-ui/a2a-middleware';
 import {
@@ -50,6 +51,60 @@ const analysisAgentUrl =
 
 // The orchestrator is an AG-UI agent reachable over HTTP.
 const orchestrationAgent = new HttpAgent({ url: orchestratorUrl });
+
+// --- Patch: @ag-ui/a2a-middleware@0.0.2 races RUN_FINISHED against its own
+// async message-state update.
+//
+// The middleware's wrapStream() applies each event to `this.messages` via
+// `this.apply(...)` + a fire-and-forget `processApplyEvents(...).subscribe()`
+// (not awaited). When RUN_FINISHED arrives, it synchronously reads
+// `this.messages` to find the just-completed tool call's arguments — but if
+// TOOL_CALL_END and RUN_FINISHED arrive back-to-back with no gap, that async
+// update may not have landed yet, and it throws "Tool arguments not found
+// for tool call id ...", killing the run with no error surfaced to the
+// browser (it just stalls forever).
+//
+// This bites models that stream a tool call's entire JSON as a single
+// TOOL_CALL_ARGS delta (observed with DeepSeek V4 Pro) — there's no
+// token-by-token gap for the async update to win the race in. Models that
+// stream token-by-token (e.g. gpt-4o-mini) happen to leave enough real time
+// between events for it to resolve correctly, which is why this doesn't
+// reproduce with every model.
+//
+// Fix: delay RUN_FINISHED by a small fixed amount (not every event, so
+// normal token streaming isn't slowed down) — enough for the async apply
+// pipeline's pending work to flush first. Patched on the prototype (not the
+// instance) since `.clone()` creates new instances via the prototype's own
+// methods.
+const RUN_FINISHED_DELAY_MS = 50;
+const originalHttpRun = HttpAgent.prototype.run;
+HttpAgent.prototype.run = function (...args) {
+  return originalHttpRun.apply(this, args).pipe(
+    concatMap(e =>
+      e.type === 'RUN_FINISHED'
+        ? timer(RUN_FINISHED_DELAY_MS).pipe(rxMap(() => e))
+        : of(e),
+    ),
+  );
+};
+
+// TEMP DIAGNOSTIC: set DEBUG_AGUI_EVENTS=1 to log every raw AG-UI event from
+// the orchestrator, before the A2A middleware processes them.
+if (process.env.DEBUG_AGUI_EVENTS) {
+  const patchedHttpRun = HttpAgent.prototype.run;
+  HttpAgent.prototype.run = function (...args) {
+    return patchedHttpRun.apply(this, args).pipe(
+      tap(e => {
+        const { type, toolCallId, toolCallName, delta, messageId, role } = e;
+        console.log(
+          '[AGUI EVENT]',
+          type,
+          JSON.stringify({ toolCallId, toolCallName, messageId, role, delta }),
+        );
+      }),
+    );
+  };
+}
 
 // A2A middleware: wraps the orchestrator and injects the
 // `send_message_to_a2a_agent` tool so it can talk to the A2A agents.

@@ -73,7 +73,7 @@ agent cards from the Research/Analysis agents at startup and crashes with
 ```bash
 # Terminal 1 — Research agent
 cd agents
-uv run python research_agent.py    # → :9001  (agent card at /.well-known/agent.json)
+uv run python research_agent.py    # → :9001  (agent card at /.well-known/agent-card.json)
 
 # Terminal 2 — Analysis agent
 cd agents
@@ -134,8 +134,8 @@ Check every service is actually up before testing a tab — an unresponsive
 chat input or a UI that never renders almost always means one of these 5
 was never started, not a code bug:
 
-- `curl localhost:9001/.well-known/agent.json` → Research agent card
-- `curl localhost:9002/.well-known/agent.json` → Analysis agent card
+- `curl localhost:9001/.well-known/agent-card.json` → Research agent card
+- `curl localhost:9002/.well-known/agent-card.json` → Analysis agent card
 - `curl localhost:8000/healthz` → orchestrator health + model
 - `curl localhost:4000/healthz` → runtime wiring info (orchestrator + A2A agent URLs)
 - `curl -o /dev/null -w '%{http_code}\n' localhost:3000` → `200` = Backstage frontend is up
@@ -160,7 +160,7 @@ runtime/                      Node: CopilotKit runtime + A2A middleware
 ## Notes & gotchas
 
 - **Startup order matters**: the CopilotKit runtime's A2A middleware fetches
-  the A2A agent cards (`.well-known/agent.json`) eagerly at startup and will
+  the A2A agent cards (`.well-known/agent-card.json`) eagerly at startup and will
   crash with `ECONNREFUSED` if the Python agents aren't up yet. Always:
   Python agents → runtime → Backstage (or just `./start-agentic-lab.sh`,
   which starts them in that order).

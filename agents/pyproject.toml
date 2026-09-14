@@ -6,11 +6,14 @@ requires-python = ">=3.11"
 dependencies = [
     "google-adk>=1.0.0",
     "ag-ui-adk>=0.7.0",
-    # Pin to the 0.3.x line: this code uses the pydantic-based API
-    # (A2AStarletteApplication, camelCase AgentCard fields). a2a-sdk 1.x is a
-    # protobuf-based rewrite with an incompatible API (no `server.apps`,
-    # snake_case fields) that this code has not been ported to.
-    "a2a-sdk>=0.3.0,<0.4.0",
+    # a2a-sdk 1.x: protobuf-based AgentCard/AgentSkill (snake_case fields),
+    # manual FastAPI route wiring via a2a.server.routes instead of
+    # A2AStarletteApplication. The [fastapi] extra pulls in what
+    # add_a2a_routes_to_fastapi needs. research_agent.py/analysis_agent.py
+    # enable v0.3 JSON-RPC wire compatibility so the JS `@a2a-js/sdk` client
+    # (used by runtime/server.mjs, which still speaks the older wire format)
+    # keeps working unchanged.
+    "a2a-sdk[fastapi]>=1.1.2,<2.0.0",
     "fastapi>=0.110.0",
     "uvicorn>=0.29.0",
     "python-dotenv>=1.0.0",

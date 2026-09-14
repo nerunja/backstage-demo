@@ -17,17 +17,24 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import uvicorn
-from a2a.server.apps import A2AStarletteApplication
+from fastapi import FastAPI
+from a2a.server.routes import (
+    add_a2a_routes_to_fastapi,
+    create_agent_card_routes,
+    create_jsonrpc_routes,
+    create_rest_routes,
+)
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
+    AgentInterface,
     AgentSkill,
 )
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
-from a2a.utils import new_agent_text_message
+from a2a.helpers.proto_helpers import new_text_message as new_agent_text_message
 
 # Google ADK imports
 from google.adk.agents.llm_agent import LlmAgent
@@ -54,13 +61,14 @@ skill = AgentSkill(
 public_agent_card = AgentCard(
     name="Analysis Agent",
     description="ADK-powered agent that analyzes research findings and provides meaningful insights",
-    url=f"http://localhost:{port}/",
     version="1.0.0",
-    defaultInputModes=["text"],
-    defaultOutputModes=["text"],
+    default_input_modes=["text"],
+    default_output_modes=["text"],
     capabilities=AgentCapabilities(streaming=True),
     skills=[skill],
-    supportsAuthenticatedExtendedCard=False,
+    supported_interfaces=[
+        AgentInterface(url=f"http://localhost:{port}/", protocol_binding="JSONRPC"),
+    ],
 )
 
 
@@ -152,17 +160,36 @@ def main():
     request_handler = DefaultRequestHandler(
         agent_executor=AnalysisAgentExecutor(),
         task_store=InMemoryTaskStore(),
+        agent_card=public_agent_card,
     )
 
-    server = A2AStarletteApplication(
-        agent_card=public_agent_card,
-        http_handler=request_handler,
-        extended_agent_card=public_agent_card,
+    app = FastAPI(title="Analysis Agent (A2A)")
+    add_a2a_routes_to_fastapi(
+        app,
+        # a2a-sdk 1.x dropped the v0.3-era backward-compat route that used to
+        # also serve the card at the deprecated `/.well-known/agent.json`
+        # path (no PREV_AGENT_CARD_WELL_KNOWN_PATH constant exists anymore).
+        # The JS `@a2a-js/sdk` client (runtime/server.mjs) still defaults to
+        # fetching that exact deprecated path, so register it ourselves too.
+        agent_card_routes=[
+            *create_agent_card_routes(public_agent_card),
+            *create_agent_card_routes(
+                public_agent_card, card_url="/.well-known/agent.json"
+            ),
+        ],
+        # enable_v0_3_compat: the JS `@a2a-js/sdk` client (runtime/server.mjs)
+        # still speaks the older v0.3 wire format (e.g. "message/send" method
+        # names, a `kind` field on Message) — this keeps both wire formats
+        # working on the same endpoint.
+        jsonrpc_routes=create_jsonrpc_routes(
+            request_handler, rpc_url="/", enable_v0_3_compat=True
+        ),
+        rest_routes=create_rest_routes(request_handler, enable_v0_3_compat=True),
     )
 
     print(f"💡 Starting Analysis Agent (ADK + A2A) on http://localhost:{port}")
-    print(f"   Agent card: http://localhost:{port}/.well-known/agent.json")
-    uvicorn.run(server.build(), host="0.0.0.0", port=port)
+    print(f"   Agent card: http://localhost:{port}/.well-known/agent-card.json")
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
